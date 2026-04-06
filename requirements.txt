@@ -4,4 +4,3 @@ streamlit-folium
 pandas
 numpy
 streamlit-option-menu
-streamlit-autorefresh
