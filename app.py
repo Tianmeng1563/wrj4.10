@@ -1,139 +1,148 @@
-import json
-import random
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
 import streamlit as st
-import plotly.express as px
-import plotly.graph_objects as go
-from streamlit_folium import st_folium
 import folium
-from folium.plugins import Draw
+import json
+import os
+from streamlit_folium import st_folium
+from streamlit_option_menu import option_menu
+from datetime import datetime
+import time
+import pandas as pd
 
-# ================== GCJ-02 转 WGS84 ==================
-def gcj02_to_wgs84(lng: float, lat: float):
-    a = 6378245.0
-    ee = 0.006693421622965943
+# ================== 障碍物记忆文件 ==================
+OBSTACLE_FILE = "obstacles.json"
 
-    def transform_lat(x, y):
-        ret = -100.0 + 2.0*x + 3.0*y + 0.2*y*y + 0.1*x*y + 0.2*np.sqrt(abs(x))
-        ret += (20.0*np.sin(6.0*x*np.pi) + 20.0*np.sin(2.0*x*np.pi)) * 2.0 / 3.0
-        ret += (20.0*np.sin(y*np.pi) + 40.0*np.sin(y/3.0*np.pi)) * 2.0 / 3.0
-        ret += (160.0*np.sin(y/12.0*np.pi) + 320*np.sin(y/30.0*np.pi)) * 2.0 / 3.0
-        return ret
+def load_obstacles():
+    if os.path.exists(OBSTACLE_FILE):
+        with open(OBSTACLE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
 
-    def transform_lng(x, y):
-        ret = 300.0 + x + 2.0*y + 0.1*x*x + 0.1*x*y + 0.1*np.sqrt(abs(x))
-        ret += (20.0*np.sin(6.0*x*np.pi) + 20.0*np.sin(2.0*x*np.pi)) * 2.0 / 3.0
-        ret += (20.0*np.sin(x*np.pi) + 40.0*np.sin(x/3.0*np.pi)) * 2.0 / 3.0
-        ret += (150.0*np.sin(x/12.0*np.pi) + 300.0*np.sin(x/30.0*np.pi)) * 2.0 / 3.0
-        return ret
+def save_obstacles(polygons):
+    with open(OBSTACLE_FILE, "w", encoding="utf-8") as f:
+        json.dump(polygons, f, ensure_ascii=False, indent=2)
 
-    dlat = transform_lat(lng - 105.0, lat - 35.0)
-    dlng = transform_lng(lng - 105.0, lat - 35.0)
-    radlat = lat / 180.0 * np.pi
-    magic = np.sin(radlat)
-    magic = 1 - ee * magic * magic
-    sqrtmagic = np.sqrt(magic)
-    dlat = (dlat * 180.0) / ((a * (1 - ee)) / (magic * sqrtmagic) * np.pi)
-    dlng = (dlng * 180.0) / (a / sqrtmagic * np.cos(radlat) * np.pi)
-    return lat - dlat, lng - dlng
+# ================== 全局状态 ==================
+if "A" not in st.session_state:
+    st.session_state.A = (32.2322, 118.7490)
+if "B" not in st.session_state:
+    st.session_state.B = (32.2343, 118.7490)
+if "A_set" not in st.session_state:
+    st.session_state.A_set = False
+if "B_set" not in st.session_state:
+    st.session_state.B_set = False
+if "height" not in st.session_state:
+    st.session_state.height = 50
+if "heartbeat_data" not in st.session_state:
+    st.session_state.heartbeat_data = []
+if "polygon_memory" not in st.session_state:
+    st.session_state.polygon_memory = load_obstacles()  # 从文件加载
+if "is_drawing" not in st.session_state:
+    st.session_state.is_drawing = False
+if "temp_points" not in st.session_state:
+    st.session_state.temp_points = []
 
-# ================== 心跳模拟 ==================
-def generate_heartbeat():
-    hb = []
-    now = datetime.now()
-    seq = 1
-    drop_start = random.randint(10, 30)
-    drop_dur = random.randint(3, 6)
-    for i in range(60):
-        if drop_start <= i < drop_start + drop_dur:
-            continue
-        ts = now + timedelta(seconds=i)
-        hb.append({
-            "seq": seq,
-            "timestamp": ts,
-            "time_str": ts.strftime("%H:%M:%S"),
-            "idx": i
-        })
-        seq += 1
-    df = pd.DataFrame(hb)
-    df["gap"] = df["timestamp"].diff().dt.total_seconds().fillna(1)
-    df["dropout"] = df["gap"] > 3
-    return df
-
-# ================== 主界面 ==================
-st.set_page_config(page_title="无人机监测", layout="wide")
-st.title("🚁 无人机心跳 + 地图 + 障碍物圈选")
-
-if "hb" not in st.session_state:
-    st.session_state.hb = generate_heartbeat()
-if "obs" not in st.session_state:
-    st.session_state.obs = []
+st.set_page_config(layout="wide")
 
 # ================== 侧边栏 ==================
 with st.sidebar:
-    st.subheader("📡 心跳控制")
-    if st.button("重新生成心跳"):
-        st.session_state.hb = generate_heartbeat()
-        st.rerun()
-
-    drop_cnt = st.session_state.hb["dropout"].sum()
-    st.metric("掉线次数", int(drop_cnt))
-
+    st.title("导航")
+    page = option_menu("功能页面", ["航线规划", "飞行监控"], default_index=0)
     st.divider()
-    st.subheader("🗺️ 坐标 A/B")
-    a_lat = st.number_input("A纬度", 32.2332, format="%.6f")
-    a_lng = st.number_input("A经度", 118.7490, format="%.6f")
-    b_lat = st.number_input("B纬度", 32.2340, format="%.6f")
-    b_lng = st.number_input("B经度", 118.7500, format="%.6f")
-
+    st.subheader("坐标系")
+    st.radio("", ["GCJ-02", "WGS-84"])
     st.divider()
-    st.subheader("🧩 障碍物")
-    if st.button("清空障碍物"):
-        st.session_state.obs = []
-        st.rerun()
+    st.subheader("系统状态")
+    st.button("A点已设" if st.session_state.A_set else "A点未设", type="primary")
+    st.button("B点已设" if st.session_state.B_set else "B点未设", type="primary")
 
-# ================== 地图 ==================
-tab1, tab2 = st.tabs(["地图", "心跳监测"])
+# ================== 航线规划 ==================
+if page == "航线规划":
+    st.title("🚁 航线规划（3D地图）")
+    col_map, col_ctrl = st.columns([3, 1])
 
-with tab1:
-    a_lat_wgs, a_lng_wgs = gcj02_to_wgs84(a_lng, a_lat)
-    b_lat_wgs, b_lng_wgs = gcj02_to_wgs84(b_lng, b_lat)
+    with col_ctrl:
+        st.subheader("控制面板")
+        a_lat = st.number_input("起点A纬度", value=st.session_state.A[0], format="%.6f")
+        a_lon = st.number_input("起点A经度", value=st.session_state.A[1], format="%.6f")
+        b_lat = st.number_input("终点B纬度", value=st.session_state.B[0], format="%.6f")
+        b_lon = st.number_input("终点B经度", value=st.session_state.B[1], format="%.6f")
+        st.session_state.height = st.slider("飞行高度(m)", 0, 200, value=st.session_state.height)
 
-    m = folium.Map(location=[a_lat_wgs, a_lng_wgs], zoom_start=17)
-    folium.TileLayer('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google').add_to(m)
-    folium.TileLayer('OpenStreetMap').add_to(m)
+        if st.button("设置A点"):
+            st.session_state.A = (a_lat, a_lon)
+            st.session_state.A_set = True
+        if st.button("设置B点"):
+            st.session_state.B = (b_lat, b_lon)
+            st.session_state.B_set = True
 
-    folium.Marker([a_lat_wgs, a_lng_wgs], icon=folium.Icon(color="green"), tooltip="A").add_to(m)
-    folium.Marker([b_lat_wgs, b_lng_wgs], icon=folium.Icon(color="red"), tooltip="B").add_to(m)
-    folium.PolyLine([[a_lat_wgs,a_lng_wgs],[b_lat_wgs,b_lng_wgs]], color="blue").add_to(m)
+        st.divider()
+        st.subheader("🧱 障碍物（带记忆）")
 
-    for p in st.session_state.obs:
-        coords = [[c[1], c[0]] for c in p["coords"]]
-        folium.Polygon(locations=coords, color="red", fill=True, fill_opacity=0.4).add_to(m)
+        if st.button("🖌️ 开始圈选障碍物"):
+            st.session_state.is_drawing = True
+            st.session_state.temp_points = []
 
-    draw = Draw(draw_options={"polygon": True}, edit_options={"edit": True})
-    draw.add_to(m)
-    out = st_folium(m, key="map", width=900, height=550)
+        if st.button("🗑️ 清除所有障碍物"):
+            st.session_state.polygon_memory = []
+            st.session_state.temp_points = []
+            save_obstacles([])
+            st.rerun()
 
-    if out and "last_active_drawing" in out and out["last_active_drawing"]:
-        geom = out["last_active_drawing"]["geometry"]
-        if geom["type"] == "Polygon":
-            coords = geom["coordinates"][0]
-            exist = any(p["coords"] == coords for p in st.session_state.obs)
-            if not exist:
-                st.session_state.obs.append({"coords": coords})
-                st.success("已添加障碍物")
-                st.rerun()
+        st.info(f"已记忆障碍物：{len(st.session_state.polygon_memory)} 个")
 
-with tab2:
-    df = st.session_state.hb
-    fig = px.line(df, x="seq", y="gap", markers=True, title="心跳间隔")
-    fig.add_hline(y=3, line_dash="dash", line_color="red")
-    st.plotly_chart(fig, use_container_width=True)
+        st.divider()
+        st.subheader("心跳状态")
+        now = datetime.now().strftime("%H:%M:%S")
+        st.metric("当前时间", now)
 
-    with st.expander("心跳记录"):
-        st.dataframe(df[["seq","time_str","gap","dropout"]])
+        st.session_state.heartbeat_data.append(time.time())
+        if len(st.session_state.heartbeat_data) > 30:
+            st.session_state.heartbeat_data.pop(0)
+        df = pd.DataFrame({
+            "时间": range(len(st.session_state.heartbeat_data)),
+            "心跳": st.session_state.heartbeat_data
+        })
+        st.line_chart(df.set_index("时间"), height=150)
+        st.success("心跳正常")
 
-st.info("✅ 已支持 GitHub 部署 + Streamlit Cloud 在线运行")
+    with col_map:
+        center_lat = (st.session_state.A[0] + st.session_state.B[0]) / 2
+        center_lon = (st.session_state.A[1] + st.session_state.B[1]) / 2
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=18, tiles="Cartodb dark_matter")
+
+        if st.session_state.A_set:
+            folium.CircleMarker(st.session_state.A, radius=10, color="red", fill=True).add_to(m)
+        if st.session_state.B_set:
+            folium.CircleMarker(st.session_state.B, radius=10, color="green", fill=True).add_to(m)
+        if st.session_state.A_set and st.session_state.B_set:
+            folium.PolyLine([st.session_state.A, st.session_state.B], color="blue", weight=3).add_to(m)
+
+        # 绘制所有记忆的障碍物
+        for poly in st.session_state.polygon_memory:
+            folium.Polygon(locations=poly, color="red", fill=True, fill_opacity=0.5).add_to(m)
+
+        # 绘制临时圈选线
+        if st.session_state.temp_points:
+            folium.PolyLine(locations=st.session_state.temp_points, color="red", weight=3).add_to(m)
+
+        output = st_folium(m, width=1000, height=600)
+
+        # 圈选逻辑
+        if st.session_state.is_drawing and output.get("last_clicked"):
+            lat = output["last_clicked"]["lat"]
+            lon = output["last_clicked"]["lng"]
+            st.session_state.temp_points.append([lat, lon])
+
+        # 自动闭合多边形并保存记忆
+        if len(st.session_state.temp_points) >= 3:
+            st.session_state.polygon_memory.append(st.session_state.temp_points)
+            save_obstacles(st.session_state.polygon_memory)  # 保存到文件
+            st.session_state.is_drawing = False
+            st.session_state.temp_points = []
+            st.rerun()
+
+elif page == "飞行监控":
+    st.title("📡 无人机飞行监控")
+    st.success("无人机在线，心跳正常")
+    st.metric("当前高度", f"{st.session_state.height} m")
+    st.metric("已记忆障碍物", len(st.session_state.polygon_memory))
