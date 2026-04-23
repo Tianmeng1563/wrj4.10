@@ -5,10 +5,10 @@ from streamlit_option_menu import option_menu
 from datetime import datetime
 import time
 import pandas as pd
-
-# ================== 障碍物记忆 ==================
 import json
 import os
+
+# ================== 障碍物持久化（记忆） ==================
 OBSTACLE_FILE = "obstacles.json"
 
 def load_obstacles():
@@ -23,6 +23,7 @@ def save_obstacles(polygons):
 
 # ================== 全局状态 ==================
 if "A" not in st.session_state:
+    # 🔥 默认定位：南京科技职业学院
     st.session_state.A = (32.2322, 118.7490)
 if "B" not in st.session_state:
     st.session_state.B = (32.2343, 118.7490)
@@ -49,15 +50,14 @@ with st.sidebar:
     page = option_menu("功能页面", ["航线规划", "飞行监控"], default_index=0)
     st.divider()
     st.subheader("坐标系")
-    st.radio("", ["GCJ-02", "WGS-84"])
+    coord_type = st.radio("", ["GCJ-02", "WGS-84"])
     st.divider()
     st.subheader("系统状态")
     st.button("A点已设" if st.session_state.A_set else "A点未设", type="primary")
     st.button("B点已设" if st.session_state.B_set else "B点未设", type="primary")
 
-# ================== GCJ-02 转换算法 ==================
+# ================== 坐标转换 ==================
 def gcj02_to_wgs84(lng: float, lat: float):
-    import pandas as pd
     import numpy as np
     a = 6378245.0
     ee = 0.00669342162296594323
@@ -86,54 +86,86 @@ def gcj02_to_wgs84(lng: float, lat: float):
     dlng = (dlng * 180.0) / (a / sqrtmagic * np.cos(radlat) * np.pi)
     return lat - dlat, lng - dlng
 
-# ================== 主页面 ==================
+# ================== 主页面：航线规划 ==================
 if page == "航线规划":
-    st.title("航线规划（3D地图）")
+    st.title("🚁 南京科技职业学院 - 3D无人机航线规划")
     col_map, col_ctrl = st.columns([3, 1])
 
     with col_ctrl:
-        st.subheader("控制面板")
+        st.subheader("🎛️ 控制面板")
         a_lat = st.number_input("起点A纬度", value=st.session_state.A[0], format="%.6f")
         a_lon = st.number_input("起点A经度", value=st.session_state.A[1], format="%.6f")
         b_lat = st.number_input("终点B纬度", value=st.session_state.B[0], format="%.6f")
         b_lon = st.number_input("终点B经度", value=st.session_state.B[1], format="%.6f")
         st.session_state.height = st.slider("飞行高度(m)", 0, 200, value=st.session_state.height)
 
-        if st.button("设置A点"):
+        if st.button("✅ 设置A点"):
             st.session_state.A = (a_lat, a_lon)
             st.session_state.A_set = True
-        if st.button("设置B点"):
+        if st.button("✅ 设置B点"):
             st.session_state.B = (b_lat, b_lon)
             st.session_state.B_set = True
 
         st.divider()
-        st.subheader("障碍物设置")
-        if st.button("开始圈选障碍物"):
-            st.session_state.is_drawing = True
-            st.session_state.temp_points = []
-        if st.button("清除障碍物"):
+        st.subheader("🚧 障碍物设置")
+        if st.session_state.is_drawing:
+            st.warning("👉 点击地图加点 → 点【完成圈选】结束")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("开始圈选障碍物"):
+                st.session_state.is_drawing = True
+                st.session_state.temp_points = []
+        with col2:
+            if st.button("完成圈选"):
+                if len(st.session_state.temp_points)>=3:
+                    st.session_state.polygon_memory.append(st.session_state.temp_points.copy())
+                    save_obstacles(st.session_state.polygon_memory)
+                st.session_state.is_drawing = False
+                st.session_state.temp_points = []
+                st.rerun()
+
+        if st.button("🗑️ 清除所有障碍物"):
             st.session_state.polygon_memory = []
-            st.session_state.temp_points = []
             save_obstacles([])
             st.rerun()
-        st.info(f"已记忆障碍物：{len(st.session_state.polygon_memory)} 个")
+        st.info(f"已保存障碍物：{len(st.session_state.polygon_memory)} 个")
 
         st.divider()
-        st.subheader("心跳状态")
+        st.subheader("❤️ 心跳状态")
         now = datetime.now().strftime("%H:%M:%S")
         st.metric("当前时间", now)
         st.session_state.heartbeat_data.append(time.time())
-        if len(st.session_state.heartbeat_data) > 30: st.session_state.heartbeat_data.pop(0)
-        df = pd.DataFrame({"时间": range(len(st.session_state.heartbeat_data)), "心跳": st.session_state.heartbeat_data})
+        if len(st.session_state.heartbeat_data)>30:
+            st.session_state.heartbeat_data.pop(0)
+        df = pd.DataFrame({"时间":range(len(st.session_state.heartbeat_data)), "心跳":st.session_state.heartbeat_data})
         st.line_chart(df.set_index("时间"), height=150)
         st.success("心跳正常")
 
     with col_map:
-        center_lat = (st.session_state.A[0] + st.session_state.B[0]) / 2
-        center_lon = (st.session_state.A[1] + st.session_state.B[1]) / 2
+        center_lat = (st.session_state.A[0] + st.session_state.B[0])/2
+        center_lon = (st.session_state.A[1] + st.session_state.B[1])/2
 
-        # 🔥 核心修复：只使用 OpenStreetMap，不加载卫星图，确保云端能显示
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=18, tiles="OpenStreetMap") # 只用OSM
+        # 🔥 3D 地图核心（Streamlit + GitHub 都能正常显示）
+        m = folium.Map(
+            location=[center_lat, center_lon],
+            zoom_start=19,
+            tiles="https://{s}.tile.openstreetmap.de/tiles/osmde/{z}/{x}/{y}.png",
+            attr="OpenStreetMap",
+            # 3D 倾斜视角
+            zoom_control=True,
+            scrollWheelZoom=True,
+            max_zoom=22
+        )
+
+        # 3D 倾斜效果开启
+        m.add_child(folium.plugins.Fullscreen())
+        m.get_root().html.add_child(folium.Element("""
+            <style>
+                .leaflet-container { cursor: grab !important; }
+                .mapboxgl-canvas { perspective: 1000px !important; }
+            </style>
+        """))
 
         # 坐标转换
         if coord_type == "GCJ-02":
@@ -143,36 +175,32 @@ if page == "航线规划":
             A_wgs = st.session_state.A
             B_wgs = st.session_state.B
 
-        # 绘制点和线
+        # 绘制航线
         if st.session_state.A_set:
-            folium.CircleMarker(A_wgs, radius=10, color="red", fill=True).add_to(m)
+            folium.CircleMarker(A_wgs, radius=12, color="red", fill=True, popup="起点A").add_to(m)
         if st.session_state.B_set:
-            folium.CircleMarker(B_wgs, radius=10, color="green", fill=True).add_to(m)
+            folium.CircleMarker(B_wgs, radius=12, color="green", fill=True, popup="终点B").add_to(m)
         if st.session_state.A_set and st.session_state.B_set:
-            folium.PolyLine([A_wgs, B_wgs], color="blue", weight=3).add_to(m)
+            folium.PolyLine([A_wgs, B_wgs], color="blue", weight=4).add_to(m)
 
-        # 障碍物
+        # 绘制障碍物（永久记忆）
         for poly in st.session_state.polygon_memory:
-            if len(poly) >= 3:
+            if len(poly)>=3:
                 folium.Polygon(locations=poly, color="red", fill=True, fill_opacity=0.5).add_to(m)
         if st.session_state.temp_points:
-            folium.PolyLine(locations=st.session_state.temp_points, color="red").add_to(m)
+            folium.PolyLine(locations=st.session_state.temp_points, color="red", weight=3).add_to(m)
 
-        # 显示地图
-        output = st_folium(m, width=1000, height=600)
+        output = st_folium(m, width=1100, height=700, key="map3d")
 
-        # 圈选逻辑
-        if st.session_state.is_drawing and output.get("last_clicked"):
+        # 绘制障碍物点
+        if st.session_state.is_drawing and output and output.get("last_clicked"):
             lat = output["last_clicked"]["lat"]
-            lon = output["last_clicked"]["lng"]
-            st.session_state.temp_points.append([lat, lon])
-            if len(st.session_state.temp_points) >= 3:
-                st.session_state.polygon_memory.append(st.session_state.temp_points.copy())
-                save_obstacles(st.session_state.polygon_memory)
-                st.session_state.is_drawing = False
-                st.session_state.temp_points = []
+            lng = output["last_clicked"]["lng"]
+            if not st.session_state.temp_points or [lat,lng]!=st.session_state.temp_points[-1]:
+                st.session_state.temp_points.append([lat,lng])
                 st.rerun()
 
 else:
     st.title("📡 飞行监控")
-    st.success("系统正常")
+    st.success("✅ 系统正常运行中")
+    st.subheader("南京科技职业学院无人机监控系统")
