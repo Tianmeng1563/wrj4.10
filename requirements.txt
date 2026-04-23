@@ -1,6 +1,6 @@
 streamlit
 folium
 streamlit-folium
+streamlit-option-menu
 pandas
 numpy
-streamlit-option-menu
